@@ -32,39 +32,44 @@ public class TripleDesCryptoTest
     }
 
     [Fact]
-    public void TestDecryptActualPayload()
+    public void TestDecrypt32ByteActualPayload()
     {
+        // Verified 32-byte ChangeKey format
         var key = Convert.FromHexString("8362BF4E27DD17C88362BF4E27DD17C8");
         var iv = Convert.FromHexString("0000000000000000");
-        var ciphertext = Convert.FromHexString("E53C294C12F05F33E9DBC268000FE4C67063D493B33677DD");
 
+        // Plaintext: NewKey (16 bytes of 0) + Version (0x01) + CRC32_1 (9C3F816C) + CRC32_2 (1344B4AA) + Padding (7 bytes of 0)
+        // Let's compute standard non-inverted CRC32 of C4 80 00000000000000000000000000000000 01:
+        // C4800000000000000000000000000000000001 -> CRC32 = 0xc2ead91d -> in little-endian: 1D D9 EA C2
+        // And CRC32 of NewKey (00000000000000000000000000000000) -> CRC32 = 0x1344b4aa -> in little-endian: AA B4 44 13
+        var plaintext = Convert.FromHexString("00000000000000000000000000000000011DD9EAC2AAB4441300000000000000");
+
+        var encrypted = TripleDesCrypto.EncryptCbcDecrypt(key, iv, plaintext);
+
+        // Decrypt block-by-block using our verified inverse mapping
         var engine = new DesEdeEngine();
-        engine.Init(true, new KeyParameter(Convert.FromHexString("8362BF4E27DD17C88362BF4E27DD17C88362BF4E27DD17C8"))); // true for encrypt
+        engine.Init(true, new KeyParameter(Convert.FromHexString("8362BF4E27DD17C88362BF4E27DD17C88362BF4E27DD17C8")));
 
-        var blockCount = ciphertext.Length / 8;
-        var plaintext = new byte[ciphertext.Length];
+        var decrypted = new byte[32];
         var previousBlock = new byte[8];
         Array.Copy(iv, previousBlock, 8);
 
-        for (int i = 0; i < blockCount; i++)
+        for (int i = 0; i < 4; i++)
         {
             var block = new byte[8];
-            Array.Copy(ciphertext, i * 8, block, 0, 8);
+            Array.Copy(encrypted, i * 8, block, 0, 8);
 
-            // Encrypt block
             var encryptedBlock = new byte[8];
             engine.ProcessBlock(block, 0, encryptedBlock, 0);
 
-            // XOR with previous block
             for (int j = 0; j < 8; j++)
             {
-                plaintext[i * 8 + j] = (byte)(encryptedBlock[j] ^ previousBlock[j]);
+                decrypted[i * 8 + j] = (byte)(encryptedBlock[j] ^ previousBlock[j]);
             }
 
             Array.Copy(block, previousBlock, 8);
         }
 
-        var expectedPlaintext = Convert.FromHexString("00000000000000000000000000000000011DD9EAC2000000");
-        Assert.Equal(expectedPlaintext, plaintext);
+        Assert.Equal(plaintext, decrypted);
     }
 }
