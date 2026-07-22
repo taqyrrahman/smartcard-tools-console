@@ -7,6 +7,127 @@ namespace ConsoleApp.DesfireTools;
 
 public static class DesfireAuth
 {
+    private static byte[] AesDecrypt(byte[] key, byte[] iv, byte[] ciphertext)
+    {
+        using var aes = Aes.Create();
+        aes.Key = key;
+        aes.IV = iv;
+        aes.Mode = CipherMode.CBC;
+        aes.Padding = PaddingMode.None;
+
+        using var decryptor = aes.CreateDecryptor();
+        return decryptor.TransformFinalBlock(ciphertext, 0, ciphertext.Length);
+    }
+
+    private static byte[] AesEncrypt(byte[] key, byte[] iv, byte[] plaintext)
+    {
+        using var aes = Aes.Create();
+        aes.Key = key;
+        aes.IV = iv;
+        aes.Mode = CipherMode.CBC;
+        aes.Padding = PaddingMode.None;
+
+        using var encryptor = aes.CreateEncryptor();
+        return encryptor.TransformFinalBlock(plaintext, 0, plaintext.Length);
+    }
+
+    /// <summary>
+    /// Performs 3-pass mutual AES-128 authentication (0xAA).
+    /// </summary>
+    public static byte[] AuthenticateAes(IsoReader isoReader, byte keyNo, byte[] key)
+    {
+        var zeroIv = new byte[16];
+
+        // Phase 1 — card sends encrypted RndB (16 bytes)
+        var phase1 = isoReader.DfTransmit(DfConstants.Cmd.Auth.Aes, [keyNo]);
+        var encRndB = phase1.GetData() ?? [];
+        if (encRndB.Length != 16)
+            throw new Exception($"Expected 16-byte encrypted RndB, got {encRndB.Length} bytes.");
+
+        // Decrypt RndB using key and zero IV
+        var rndB = AesDecrypt(key, zeroIv, encRndB);
+
+        // Rotate RndB left by 1 byte to get RndB'
+        var rndBShifted = ByteManipulation.RotateLeft(rndB);
+
+        // Phase 2 — PCD generates random 16-byte RndA
+        var rndA = RandomNumberGenerator.GetBytes(16);
+
+        // Concatenate RndA and RndB' (32 bytes total)
+        var plaintext = rndA.Concat(rndBShifted).ToArray();
+
+        // Encrypt RndA + RndB' using key and encRndB as IV (as specified by NXP: the cipher text of the first block of the preceding exchange)
+        var phase2Payload = AesEncrypt(key, encRndB, plaintext);
+
+        // Phase 3 — card sends encrypted RndA' (rotated RndA), we verify it
+        var phase3 = isoReader.DfTransmit(DfConstants.Cmd.AdditionalFrame, phase2Payload);
+        var encRndARotated = phase3.GetData() ?? [];
+        if (encRndARotated.Length != 16)
+            throw new Exception($"Expected 16-byte encrypted RndA', got {encRndARotated.Length} bytes.");
+
+        // Decrypt RndA' using key and the last 16 bytes of the phase 2 payload as the IV (from standard CBC mode)
+        var phase2LastBlock = phase2Payload.AsSpan(16, 16).ToArray();
+        var rndAPrime = AesDecrypt(key, phase2LastBlock, encRndARotated);
+
+        // Verify rotated RndA
+        var expectedRndAPrime = ByteManipulation.RotateLeft(rndA);
+        if (!rndAPrime.SequenceEqual(expectedRndAPrime))
+            throw new Exception("Authentication failed: card cryptogram invalid.");
+
+        // Generate AES-128 session key
+        // Session Key = RndA[0..3] + RndB[0..3] + RndA[12..15] + RndB[12..15]
+        var sessionKey = new byte[16];
+        Array.Copy(rndA, 0, sessionKey, 0, 4);
+        Array.Copy(rndB, 0, sessionKey, 4, 4);
+        Array.Copy(rndA, 12, sessionKey, 8, 4);
+        Array.Copy(rndB, 12, sessionKey, 12, 4);
+
+        return sessionKey;
+    }
+
+    /// <summary>
+    /// Changes the PICC master key to AES and sets the key version.
+    /// Uses the active DES/3DES session key to encrypt the command payload.
+    /// </summary>
+    public static void ChangeKeyToAes(IsoReader isoReader, byte[] sessionKey, byte[] newAesKey, byte newKeyVersion)
+    {
+        if (newAesKey.Length != 16)
+            throw new ArgumentException("AES-128 key must be exactly 16 bytes.", nameof(newAesKey));
+
+        // 1. Calculate CRC32 of: cmd (0xC4) + KeyNo (0x80) + newAesKey (16 bytes) + newKeyVersion (1 byte)
+        var crcData = new byte[19];
+        crcData[0] = DfConstants.Cmd.ChangeKey;
+        crcData[1] = 0x80; // PICC Master Key No with AES type flag (0x00 | 0x80 = 0x80)
+        Array.Copy(newAesKey, 0, crcData, 2, 16);
+        crcData[18] = newKeyVersion;
+
+        var crc32 = DesfireCrc.CalculateCrc32(crcData);
+
+        // 2. Construct the 24-byte plaintext block to be encrypted
+        // Since we are authenticated under a DES/3DES session key (block size 8 bytes),
+        // the unencrypted payload size is 21 bytes (16-byte key + 1-byte version + 4-byte CRC).
+        // Aligned to the 8-byte block boundary, the plaintext block is exactly 24 bytes long.
+        // [New Key (16 bytes)] + [New Key Version (1 byte)] + [CRC32 (4 bytes)] + [Padding (3 bytes of 0x00)]
+        var plaintext = new byte[24];
+        Array.Copy(newAesKey, 0, plaintext, 0, 16);
+        plaintext[16] = newKeyVersion;
+        Array.Copy(crc32, 0, plaintext, 17, 4);
+
+        // 3. Encrypt the plaintext using the current DES/3DES session key in CBC send/decryption mode
+        var zeroIv = new byte[8];
+        var encryptedData = TripleDesCrypto.EncryptCbcDecrypt(sessionKey, zeroIv, plaintext);
+
+        // 4. Construct the APDU payload: KeyNo (0x80) + encryptedData (24 bytes)
+        var apduPayload = new byte[25];
+        apduPayload[0] = 0x80;
+        Array.Copy(encryptedData, 0, apduPayload, 1, 24);
+
+        // 5. Send ChangeKey APDU command to the card
+        var response = isoReader.DfTransmit(DfConstants.Cmd.ChangeKey, apduPayload);
+        if (response.SW2 != DfConstants.Sw.Sw2Ok)
+            throw new Exception($"ChangeKey failed with SW: {BitConverter.ToString([response.SW1, response.SW2])}");
+    }
+
     /// <summary>
     /// Performs 3-pass mutual DESFire authentication (Native 0x0A or ISO 0x1A).
     /// </summary>
@@ -40,17 +161,30 @@ public static class DesfireAuth
             throw new Exception("Authentication failed: card cryptogram invalid.");
 
         // var sessionIv = encRndARotated.AsSpan(encRndARotated.Length - 8, 8).ToArray();
-        var sessionKey = GenerateSessionKey(rndA, rndB);
+        var sessionKey = GenerateSessionKey(rndA, rndB, key);
         return sessionKey;
     }
 
-    private static byte[] GenerateSessionKey(byte[] rndA, byte[] rndB)
+    private static byte[] GenerateSessionKey(byte[] rndA, byte[] rndB, byte[] masterKey)
     {
+        bool isSingleDes = masterKey.Length == 8 ||
+                           (masterKey.Length >= 16 && masterKey.Take(8).SequenceEqual(masterKey.Skip(8).Take(8)));
+
         var key = new byte[16];
-        Array.Copy(rndA, 0, key, 0, 4);
-        Array.Copy(rndB, 0, key, 4, 4);
-        Array.Copy(rndA, 4, key, 8, 4);
-        Array.Copy(rndB, 4, key, 12, 4);
+        if (isSingleDes)
+        {
+            Array.Copy(rndA, 0, key, 0, 4);
+            Array.Copy(rndB, 0, key, 4, 4);
+            Array.Copy(rndA, 0, key, 8, 4);
+            Array.Copy(rndB, 0, key, 12, 4);
+        }
+        else
+        {
+            Array.Copy(rndA, 0, key, 0, 4);
+            Array.Copy(rndB, 0, key, 4, 4);
+            Array.Copy(rndA, 4, key, 8, 4);
+            Array.Copy(rndB, 4, key, 12, 4);
+        }
         return key;
     }
 }
