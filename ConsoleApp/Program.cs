@@ -32,5 +32,17 @@ internal static class Program
         var aesSessionKey = DesfireAuth.AuthenticateAes(reader, 0, newAesKey);
         Logger.Info($"AES Session key: {BitConverter.ToString(aesSessionKey)}");
         Logger.Info("AES-128 authentication successful!");
+
+        // 3. Revert back to 3DES
+        var reverted3DesKey = new byte[24]; // Standard all zeroes 3DES master key (same as original)
+        Logger.Info("Changing master key back to 3DES...");
+        DesfireAuth.ChangeKeyTo3Des(reader, aesSessionKey, reverted3DesKey);
+        Logger.Info("Master key successfully reverted to 3DES!");
+
+        // 4. Re-authenticate using the reverted 3DES key via Native auth (0x0A)
+        Logger.Info("Re-authenticating with the reverted 3DES key...");
+        var nativeSessionKey = DesfireAuth.Authenticate(reader, DfConstants.Cmd.Auth.Native, 0, reverted3DesKey);
+        Logger.Info($"Native/3DES Session key: {BitConverter.ToString(nativeSessionKey)}");
+        Logger.Info("Native/3DES authentication successful!");
     }
 }

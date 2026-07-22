@@ -149,6 +149,52 @@ public static class DesfireAuth
     }
 
     /// <summary>
+    /// Changes the PICC master key from AES back to 3DES (2-key 3DES or 3-key 3DES) under an active AES-128 session.
+    /// Since the current authenticated key is 0x00, we use the SAME-KEY ChangeKey scheme.
+    /// </summary>
+    public static void ChangeKeyTo3Des(IsoReader isoReader, byte[] aesSessionKey, byte[] new3DesKey)
+    {
+        if (new3DesKey.Length != 16 && new3DesKey.Length != 24)
+            throw new ArgumentException("3DES key must be 16 or 24 bytes.", nameof(new3DesKey));
+
+        // Determine target key type flag:
+        // PICC Master Key No is 0.
+        // For 16-byte 3DES (2-key 3DES), the flag is 0x00.
+        // For 24-byte 3DES (3-key 3DES), the flag is 0x40.
+        byte keyTypeFlag = new3DesKey.Length == 24 ? (byte)0x40 : (byte)0x00;
+        byte keyNoWithType = (byte)(0x00 | keyTypeFlag);
+
+        // CRC32 of: cmd (0xC4) + KeyNoWithType (0x00 or 0x40) + new3DesKey (16 or 24 bytes)
+        var crcData = new byte[2 + new3DesKey.Length];
+        crcData[0] = DfConstants.Cmd.ChangeKey;
+        crcData[1] = keyNoWithType;
+        Array.Copy(new3DesKey, 0, crcData, 2, new3DesKey.Length);
+
+        var crc32 = DesfireCrc.CalculateCrc32(crcData);
+
+        // Construct plaintext block: [new3DesKey] + [CRC32] + [Padding to 16-byte boundary]
+        int unpaddedLength = new3DesKey.Length + 4;
+        int paddedLength = ((unpaddedLength + 15) / 16) * 16; // Align to 16 bytes for AES block size
+        var plaintext = new byte[paddedLength];
+        Array.Copy(new3DesKey, 0, plaintext, 0, new3DesKey.Length);
+        Array.Copy(crc32, 0, plaintext, new3DesKey.Length, 4);
+
+        // Encrypt the plaintext using the active AES-128 session key in CBC mode with a zero IV
+        var zeroIv = new byte[16];
+        var encryptedData = AesEncrypt(aesSessionKey, zeroIv, plaintext);
+
+        // Construct APDU payload: KeyNoWithType + encryptedData
+        var apduPayload = new byte[1 + encryptedData.Length];
+        apduPayload[0] = keyNoWithType;
+        Array.Copy(encryptedData, 0, apduPayload, 1, encryptedData.Length);
+
+        // Send ChangeKey APDU command to the card
+        var response = isoReader.DfTransmit(DfConstants.Cmd.ChangeKey, apduPayload);
+        if (response.SW2 != DfConstants.Sw.Sw2Ok)
+            throw new Exception($"ChangeKey back to 3DES failed with SW: {BitConverter.ToString([response.SW1, response.SW2])}");
+    }
+
+    /// <summary>
     /// Performs 3-pass mutual DESFire authentication (Native 0x0A or ISO 0x1A).
     /// </summary>
     public static byte[] Authenticate(IsoReader isoReader, byte authType, byte keyNo, byte[] key)
