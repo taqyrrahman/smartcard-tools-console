@@ -9,6 +9,7 @@
 
     <ItemGroup>
       <PackageReference Include="BouncyCastle.Cryptography" Version="2.6.2" />
+      <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.10" />
       <PackageReference Include="PCSC.Iso7816" Version="7.0.1" />
     </ItemGroup>
 
