@@ -87,41 +87,72 @@ public static class DesfireAuth
 
     /// <summary>
     /// Changes the PICC master key to AES and sets the key version.
-    /// Since the current authenticated session is DES/3DES (block size 8 bytes),
-    /// the unencrypted payload size is 21 bytes (16-byte key + 1-byte version + 4-byte CRC).
-    /// Aligned to the 8-byte block boundary of the active session, the plaintext block is exactly 24 bytes long.
+    /// Since the authenticated key (0x00) is different from the target key number to be configured (0x80),
+    /// we must use the "different-key" ChangeKey scheme.
+    /// This requires a 32-byte payload to be encrypted:
+    /// [New Key XOR Old Key (16 bytes)] + [New Key Version (1 byte)] + [CRC32_1 (4 bytes)] + [CRC32_2 (4 bytes)] + [Padding (7 bytes of 0x00)]
     /// </summary>
-    public static void ChangeKeyToAes(IsoReader isoReader, byte[] sessionKey, byte[] newAesKey, byte newKeyVersion)
+    public static void ChangeKeyToAes(IsoReader isoReader, byte[] sessionKey, byte[] newAesKey, byte newKeyVersion, byte[]? oldKey = null)
     {
         if (newAesKey.Length != 16)
             throw new ArgumentException("AES-128 key must be exactly 16 bytes.", nameof(newAesKey));
 
-        // 1. Calculate CRC32 of: cmd (0xC4) + KeyNo (0x80) + newAesKey (16 bytes) + newKeyVersion (1 byte)
-        var crcData = new byte[19];
-        crcData[0] = DfConstants.Cmd.ChangeKey;
-        crcData[1] = 0x80; // PICC Master Key No with AES type flag (0x00 | 0x80 = 0x80)
-        Array.Copy(newAesKey, 0, crcData, 2, 16);
-        crcData[18] = newKeyVersion;
+        // Normalize old key to 16 bytes. If not provided or length differs, default to 16 bytes of 0x00.
+        var normOldKey = new byte[16];
+        if (oldKey != null)
+        {
+            if (oldKey.Length == 16)
+            {
+                Array.Copy(oldKey, 0, normOldKey, 0, 16);
+            }
+            else if (oldKey.Length == 8)
+            {
+                Array.Copy(oldKey, 0, normOldKey, 0, 8);
+                Array.Copy(oldKey, 0, normOldKey, 8, 8);
+            }
+            else if (oldKey.Length == 24)
+            {
+                Array.Copy(oldKey, 0, normOldKey, 0, 16);
+            }
+        }
 
-        var crc32 = DesfireCrc.CalculateCrc32(crcData);
+        // XOR new key with old key
+        var xorKey = new byte[16];
+        for (int i = 0; i < 16; i++)
+        {
+            xorKey[i] = (byte)(newAesKey[i] ^ normOldKey[i]);
+        }
 
-        // 2. Construct the 24-byte plaintext block to be encrypted
-        // [New Key (16 bytes)] + [New Key Version (1 byte)] + [CRC32 (4 bytes)] + [Padding (3 bytes of 0x00)]
-        var plaintext = new byte[24];
-        Array.Copy(newAesKey, 0, plaintext, 0, 16);
+        // CRC32_1 of: cmd (0xC4) + KeyNo (0x80) + xorKey (16 bytes) + newKeyVersion (1 byte)
+        var crc1Data = new byte[19];
+        crc1Data[0] = DfConstants.Cmd.ChangeKey;
+        crc1Data[1] = 0x80; // PICC Master Key No with AES type flag (0x00 | 0x80 = 0x80)
+        Array.Copy(xorKey, 0, crc1Data, 2, 16);
+        crc1Data[18] = newKeyVersion;
+
+        var crc32_1 = DesfireCrc.CalculateCrc32(crc1Data);
+
+        // CRC32_2 of: raw newAesKey (16 bytes)
+        var crc32_2 = DesfireCrc.CalculateCrc32(newAesKey);
+
+        // Construct 32-byte plaintext block to be encrypted:
+        // [xorKey (16 bytes)] + [New Key Version (1 byte)] + [CRC32_1 (4 bytes)] + [CRC32_2 (4 bytes)] + [Padding (7 bytes of 0x00)]
+        var plaintext = new byte[32];
+        Array.Copy(xorKey, 0, plaintext, 0, 16);
         plaintext[16] = newKeyVersion;
-        Array.Copy(crc32, 0, plaintext, 17, 4);
+        Array.Copy(crc32_1, 0, plaintext, 17, 4);
+        Array.Copy(crc32_2, 0, plaintext, 21, 4);
 
-        // 3. Encrypt the plaintext using the current DES/3DES session key in CBC send/decryption mode
+        // Encrypt the plaintext using the current DES/3DES session key in CBC send/decryption mode
         var zeroIv = new byte[8];
         var encryptedData = TripleDesCrypto.EncryptCbcDecrypt(sessionKey, zeroIv, plaintext);
 
-        // 4. Construct the APDU payload: KeyNo (0x80) + encryptedData (24 bytes)
-        var apduPayload = new byte[25];
+        // Construct APDU payload: KeyNo (0x80) + encryptedData (32 bytes)
+        var apduPayload = new byte[33];
         apduPayload[0] = 0x80;
-        Array.Copy(encryptedData, 0, apduPayload, 1, 24);
+        Array.Copy(encryptedData, 0, apduPayload, 1, 32);
 
-        // 5. Send ChangeKey APDU command to the card
+        // Send ChangeKey APDU command to the card
         var response = isoReader.DfTransmit(DfConstants.Cmd.ChangeKey, apduPayload);
         if (response.SW2 != DfConstants.Sw.Sw2Ok)
             throw new Exception($"ChangeKey failed with SW: {BitConverter.ToString([response.SW1, response.SW2])}");

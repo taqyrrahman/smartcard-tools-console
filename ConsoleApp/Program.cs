@@ -24,7 +24,9 @@ internal static class Program
         var newAesKey = new byte[16]; // All zeroes AES-128 master key
         byte newKeyVersion = 0x01;
         Logger.Info($"Changing master key to AES (Version: 0x{newKeyVersion:X2})...");
-        DesfireAuth.ChangeKeyToAes(reader, sessionKey, newAesKey, newKeyVersion);
+        // The master key is initially 3DES (24-byte, but since it is native/legacy auth (0x0A) using 24-bytes all-zeroes,
+        // it acts as single-DES or 3DES key, which we normalize inside ChangeKeyToAes).
+        DesfireAuth.ChangeKeyToAes(reader, sessionKey, newAesKey, newKeyVersion, new byte[24]);
         Logger.Info("Master key successfully changed to AES-128!");
 
         // 2. Re-authenticate using the new AES key via AES auth (0xAA)
