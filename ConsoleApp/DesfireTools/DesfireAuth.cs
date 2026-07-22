@@ -87,7 +87,9 @@ public static class DesfireAuth
 
     /// <summary>
     /// Changes the PICC master key to AES and sets the key version.
-    /// Uses the active DES/3DES session key to encrypt the command payload.
+    /// Since the current authenticated session is DES/3DES (block size 8 bytes),
+    /// the unencrypted payload size is 21 bytes (16-byte key + 1-byte version + 4-byte CRC).
+    /// Aligned to the 8-byte block boundary of the active session, the plaintext block is exactly 24 bytes long.
     /// </summary>
     public static void ChangeKeyToAes(IsoReader isoReader, byte[] sessionKey, byte[] newAesKey, byte newKeyVersion)
     {
@@ -104,9 +106,6 @@ public static class DesfireAuth
         var crc32 = DesfireCrc.CalculateCrc32(crcData);
 
         // 2. Construct the 24-byte plaintext block to be encrypted
-        // Since we are authenticated under a DES/3DES session key (block size 8 bytes),
-        // the unencrypted payload size is 21 bytes (16-byte key + 1-byte version + 4-byte CRC).
-        // Aligned to the 8-byte block boundary, the plaintext block is exactly 24 bytes long.
         // [New Key (16 bytes)] + [New Key Version (1 byte)] + [CRC32 (4 bytes)] + [Padding (3 bytes of 0x00)]
         var plaintext = new byte[24];
         Array.Copy(newAesKey, 0, plaintext, 0, 16);
