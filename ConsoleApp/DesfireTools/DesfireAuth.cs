@@ -116,31 +116,36 @@ public static class DesfireAuth
         }
         else
         {
-            // CRC32 of: cmd (0xC4) + KeyNo (0x80) + newAesKey (16 bytes) + newKeyVersion (1 byte)
-            var crcData = new byte[19];
-            crcData[0] = DfConstants.Cmd.ChangeKey;
-            crcData[1] = 0x80; // PICC Master Key No with AES type flag (0x00 | 0x80 = 0x80)
-            Array.Copy(newAesKey, 0, crcData, 2, 16);
-            crcData[18] = newKeyVersion;
+            // Verified 32-byte ChangeKey format for CRC32 under 3DES session
+            // CRC32_1 of: cmd (0xC4) + KeyNo (0x80) + newAesKey (16 bytes) + newKeyVersion (1 byte)
+            var crcData1 = new byte[19];
+            crcData1[0] = DfConstants.Cmd.ChangeKey;
+            crcData1[1] = 0x80; // PICC Master Key No with AES type flag (0x00 | 0x80 = 0x80)
+            Array.Copy(newAesKey, 0, crcData1, 2, 16);
+            crcData1[18] = newKeyVersion;
 
-            var crc32 = DesfireCrc.CalculateCrc32(crcData);
+            var crc32_1 = DesfireCrc.CalculateCrc32(crcData1);
 
-            // Construct 24-byte plaintext block to be encrypted:
-            // [newAesKey (16 bytes)] + [newKeyVersion (1 byte)] + [CRC32 (4 bytes)] + [Padding (3 bytes of 0x00)]
-            plaintext = new byte[24];
+            // CRC32_2 of: newAesKey (16 bytes)
+            var crc32_2 = DesfireCrc.CalculateCrc32(newAesKey);
+
+            // Construct 32-byte plaintext block to be encrypted:
+            // [newAesKey (16 bytes)] + [newKeyVersion (1 byte)] + [CRC32_1 (4 bytes)] + [CRC32_2 (4 bytes)] + [Padding (7 bytes of 0x00)]
+            plaintext = new byte[32];
             Array.Copy(newAesKey, 0, plaintext, 0, 16);
             plaintext[16] = newKeyVersion;
-            Array.Copy(crc32, 0, plaintext, 17, 4);
+            Array.Copy(crc32_1, 0, plaintext, 17, 4);
+            Array.Copy(crc32_2, 0, plaintext, 21, 4);
         }
 
         // Encrypt the plaintext using the current DES/3DES session key in CBC send/decryption mode
         var zeroIv = new byte[8];
         var encryptedData = TripleDesCrypto.EncryptCbcDecrypt(sessionKey, zeroIv, plaintext);
 
-        // Construct APDU payload: KeyNo (0x80) + encryptedData (24 bytes)
-        var apduPayload = new byte[25];
+        // Construct APDU payload: KeyNo (0x80) + encryptedData
+        var apduPayload = new byte[1 + encryptedData.Length];
         apduPayload[0] = 0x80;
-        Array.Copy(encryptedData, 0, apduPayload, 1, 24);
+        Array.Copy(encryptedData, 0, apduPayload, 1, encryptedData.Length);
 
         // Send ChangeKey APDU command to the card
         var response = isoReader.DfTransmit(DfConstants.Cmd.ChangeKey, apduPayload);

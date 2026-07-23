@@ -32,6 +32,36 @@ public class TripleDesCryptoTest
     }
 
     [Fact]
+    public void TestChangeKeyToAesCrc32PlaintextConstruction()
+    {
+        var newAesKey = new byte[16];
+        byte newKeyVersion = 0x01;
+
+        // CRC32_1 of: cmd (0xC4) + KeyNo (0x80) + newAesKey (16 bytes) + newKeyVersion (1 byte)
+        var crcData1 = new byte[19];
+        crcData1[0] = 0xC4; // ChangeKey command
+        crcData1[1] = 0x80; // PICC Master Key No with AES type flag
+        Array.Copy(newAesKey, 0, crcData1, 2, 16);
+        crcData1[18] = newKeyVersion;
+
+        var crc32_1 = DesfireCrc.CalculateCrc32(crcData1);
+
+        // CRC32_2 of: newAesKey (16 bytes)
+        var crc32_2 = DesfireCrc.CalculateCrc32(newAesKey);
+
+        // Construct 32-byte plaintext block to be encrypted:
+        // [newAesKey (16 bytes)] + [newKeyVersion (1 byte)] + [CRC32_1 (4 bytes)] + [CRC32_2 (4 bytes)] + [Padding (7 bytes of 0x00)]
+        var plaintext = new byte[32];
+        Array.Copy(newAesKey, 0, plaintext, 0, 16);
+        plaintext[16] = newKeyVersion;
+        Array.Copy(crc32_1, 0, plaintext, 17, 4);
+        Array.Copy(crc32_2, 0, plaintext, 21, 4);
+
+        var expectedPlaintext = Convert.FromHexString("00000000000000000000000000000000011DD9EAC2AAB4441300000000000000");
+        Assert.Equal(expectedPlaintext, plaintext);
+    }
+
+    [Fact]
     public void TestDecrypt32ByteActualPayload()
     {
         // Verified 32-byte ChangeKey format
