@@ -200,7 +200,7 @@ public static class DesfireAuth
     public static byte[] Authenticate(IsoReader isoReader, byte authType, byte keyNo, byte[] key)
     {
         var zeroIv = new byte[8];
-        int rndSize = key.Length == 24 ? 16 : 8;
+        int rndSize = (authType == DfConstants.Cmd.Auth.Iso && key.Length == 24) ? 16 : 8;
 
         // Phase 1 — card sends encrypted RndB
         var phase1 = isoReader.DfTransmit(authType, [keyNo]);
@@ -242,7 +242,7 @@ public static class DesfireAuth
 
     private static byte[] GenerateSessionKey(byte[] rndA, byte[] rndB, byte[] masterKey)
     {
-        if (masterKey.Length == 24)
+        if (masterKey.Length == 24 && rndA.Length == 16)
         {
             var key3k = new byte[24];
             // Session Key under 3K3DES:

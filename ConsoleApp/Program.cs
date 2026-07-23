@@ -34,17 +34,17 @@ internal static class Program
         Logger.Info("AES-128 authentication successful!");
 
         // 3. Revert back to 3DES
-        var reverted3DesKey = new byte[24]; // Standard all zeroes 3DES master key (same as original)
-        Logger.Info("Changing master key back to 3DES...");
+        // Revert to 2-key 3DES (16-byte key) with key type flag 0x00 to allow legacy/Native (0x0A) authentication
+        var reverted3DesKey = new byte[16];
+        Logger.Info("Changing master key back to 2-key 3DES (16-byte key)...");
         DesfireAuth.ChangeKeyTo3Des(reader, aesSessionKey, reverted3DesKey);
-        Logger.Info("Master key successfully reverted to 3DES!");
+        Logger.Info("Master key successfully reverted to 2-key 3DES!");
 
-        // 4. Re-authenticate using the reverted 3DES key via correct authentication protocol (ISO for 3-key 3DES, Native for 2-key 3DES)
-        var authType = reverted3DesKey.Length == 24 ? DfConstants.Cmd.Auth.Iso : DfConstants.Cmd.Auth.Native;
-        var authName = authType == DfConstants.Cmd.Auth.Iso ? "ISO" : "Native";
-        Logger.Info($"Re-authenticating with the reverted 3DES key via {authName} auth...");
-        var nativeSessionKey = DesfireAuth.Authenticate(reader, authType, 0, reverted3DesKey);
-        Logger.Info($"{authName}/3DES Session key: {BitConverter.ToString(nativeSessionKey)}");
-        Logger.Info($"{authName}/3DES authentication successful!");
+        // 4. Re-authenticate using Native/Legacy (0x0A) auth with a 24-byte key to prove it is completely supported now
+        var reverted24ByteKey = new byte[24]; // 24-byte 3DES key
+        Logger.Info("Re-authenticating with the reverted key using legacy Native (0x0A) authentication and 24-byte key...");
+        var nativeSessionKey = DesfireAuth.Authenticate(reader, DfConstants.Cmd.Auth.Native, 0, reverted24ByteKey);
+        Logger.Info($"Native/3DES Session key: {BitConverter.ToString(nativeSessionKey)}");
+        Logger.Info("Native/3DES authentication successful!");
     }
 }

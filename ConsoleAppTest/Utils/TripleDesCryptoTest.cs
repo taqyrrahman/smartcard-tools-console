@@ -94,4 +94,31 @@ public class TripleDesCryptoTest
 
         Assert.Equal(expectedSessKey, result);
     }
+
+    [Fact]
+    public void Test24ByteNativeAndIsoSessionKeyDerivations()
+    {
+        var masterKey = new byte[24]; // 24-byte key
+        var method = typeof(ConsoleApp.DesfireTools.DesfireAuth).GetMethod("GenerateSessionKey",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        Assert.NotNull(method);
+
+        // 1. Test 24-byte key under Native (0x0A) authentication (8-byte challenges)
+        // Since masterKey is all zeroes, it is treated as single DES, so session key is derived as:
+        // RndA[0..3] + RndB[0..3] + RndA[0..3] + RndB[0..3] with cleared parity bits.
+        var rndANative = Convert.FromHexString("0102030405060708");
+        var rndBNative = Convert.FromHexString("1112131415161718");
+        var resultNative = (byte[])method.Invoke(null, [rndANative, rndBNative, masterKey])!;
+
+        var expectedSessKeyNative = Convert.FromHexString("00020204101212140002020410121214");
+        Assert.Equal(expectedSessKeyNative, resultNative);
+
+        // 2. Test 24-byte key under ISO (0x1A) authentication (16-byte challenges)
+        var rndAIso = Convert.FromHexString("36C5F8BF4A09AC239E8DA0C73251D4AB");
+        var rndBIso = Convert.FromHexString("316E6D76A449F925BA304FB2653656A2");
+        var resultIso = (byte[])method.Invoke(null, [rndAIso, rndBIso, masterKey])!;
+
+        var expectedSessKeyIso = Convert.FromHexString("36C4F8BE306E6C76AC229E8CF824BA303250D4AA643656A2");
+        Assert.Equal(expectedSessKeyIso, resultIso);
+    }
 }
