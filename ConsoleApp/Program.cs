@@ -1,4 +1,4 @@
-﻿using ConsoleApp.DesfireTools;
+using ConsoleApp.DesfireTools;
 using ConsoleApp.Extensions;
 using ConsoleApp.Utils;
 
@@ -14,37 +14,80 @@ internal static class Program
         var getVersionResponse = reader.DfTransmitChunks(DfConstants.Cmd.GetVersion, []);
         Logger.Info($"Get Version Response: {BitConverter.ToString(getVersionResponse)}");
 
+        // ── Step 1: Read key settings to detect the card's current master-key type ──────────────
         var getKeySettingsResponse = reader.DfTransmit(DfConstants.Cmd.GetKeySettings, []);
-        Logger.Info($"Get Key Settings Response: {BitConverter.ToString(getKeySettingsResponse.GetData())}");
+        var keySettingsData = getKeySettingsResponse.GetData() ?? [];
+        Logger.Info($"Get Key Settings Response: {BitConverter.ToString(keySettingsData)}");
 
-        var sessionKey = DesfireAuth.Authenticate(reader, DfConstants.Cmd.Auth.Native, 0, new byte[24]);
-        Logger.Info($"Session key: {BitConverter.ToString(sessionKey)}");
+        var (keyType, keyCount) = DesfireAuth.ParseKeySettings(keySettingsData);
+        Logger.Info($"Detected key type: {keyType}, key count: {keyCount}");
 
-        // 1. Change key to AES-128
-        var newAesKey = new byte[16]; // All zeroes AES-128 master key
+        // ── Step 2: Authenticate with the current master key ──────────────────────────────────
+        // Auth command and key size depend on the key type stored on the card:
+        //   DES / 2K3DES → Native (0x0A), 16-byte key, 8-byte challenges
+        //   3K3DES        → ISO    (0x1A), 24-byte key, 16-byte challenges
+        //   AES           → AES    (0xAA), 16-byte key, 16-byte challenges
+        byte[] sessionKey;
+        switch (keyType)
+        {
+            case DfKeyType.ThreeDes:
+                Logger.Info("Authenticating with 3K3DES key via ISO auth (0x1A)...");
+                var key3k = new byte[24]; // all-zeros 3K3DES master key
+                sessionKey = DesfireAuth.Authenticate(reader, DfConstants.Cmd.Auth.Iso, 0, key3k);
+                Logger.Info($"3K3DES session key: {BitConverter.ToString(sessionKey)}");
+                break;
+
+            case DfKeyType.Aes:
+                Logger.Info("Authenticating with AES key via AES auth (0xAA)...");
+                var keyAes = new byte[16]; // all-zeros AES-128 master key
+                sessionKey = DesfireAuth.AuthenticateAes(reader, 0, keyAes);
+                Logger.Info($"AES session key: {BitConverter.ToString(sessionKey)}");
+                break;
+
+            default: // DES / 2K3DES
+                Logger.Info("Authenticating with 2K3DES key via Native auth (0x0A)...");
+                var key2k = new byte[16]; // all-zeros 2K3DES master key
+                sessionKey = DesfireAuth.Authenticate(reader, DfConstants.Cmd.Auth.Native, 0, key2k);
+                Logger.Info($"2K3DES session key: {BitConverter.ToString(sessionKey)}");
+                break;
+        }
+        Logger.Info("Initial authentication successful!");
+
+        // ── Step 3: Change master key to AES-128 ──────────────────────────────────────────────
+        var newAesKey = new byte[16]; // all-zeros AES-128 master key
         byte newKeyVersion = 0x01;
-        Logger.Info($"Changing master key to AES (Version: 0x{newKeyVersion:X2})...");
-        DesfireAuth.ChangeKeyToAes(reader, sessionKey, newAesKey, newKeyVersion, useCrc16: true);
-        Logger.Info("Master key successfully changed to AES-128!");
+        Logger.Info($"Changing master key to AES-128 (Version: 0x{newKeyVersion:X2})...");
 
-        // 2. Re-authenticate using the new AES key via AES auth (0xAA)
-        Logger.Info("Re-authenticating with the newly set AES-128 key...");
+        if (keyType == DfKeyType.Aes)
+        {
+            // Already AES — skip the key change and go straight to AES re-auth
+            Logger.Info("Card already uses AES. Skipping ChangeKey step.");
+        }
+        else
+        {
+            // ChangeKeyToAes auto-selects CRC/encryption mode from the session key length:
+            //   16-byte session key (2K3DES/Native) → CRC16 + CBC-send mode
+            //   24-byte session key (3K3DES/ISO)    → CRC32 + forward 3DES-CBC
+            DesfireAuth.ChangeKeyToAes(reader, sessionKey, newAesKey, newKeyVersion);
+            Logger.Info("Master key changed to AES-128.");
+        }
+
+        // ── Step 4: Re-authenticate with the new AES key ─────────────────────────────────────
+        Logger.Info("Re-authenticating with the AES-128 key...");
         var aesSessionKey = DesfireAuth.AuthenticateAes(reader, 0, newAesKey);
-        Logger.Info($"AES Session key: {BitConverter.ToString(aesSessionKey)}");
-        Logger.Info("AES-128 authentication successful!");
+        Logger.Info($"AES session key: {BitConverter.ToString(aesSessionKey)}");
+        Logger.Info("AES authentication successful!");
 
-        // 3. Revert back to 3DES
-        // Revert to 2-key 3DES (16-byte key) with key type flag 0x00 to allow legacy/Native (0x0A) authentication
-        var reverted3DesKey = new byte[16];
-        Logger.Info("Changing master key back to 2-key 3DES (16-byte key)...");
+        // ── Step 5: Revert master key back to 3K3DES (24-byte, all-zeros) ────────────────────
+        var reverted3DesKey = new byte[24]; // 24-byte 3K3DES all-zeros key
+        Logger.Info("Changing master key back to 3K3DES (24-byte key)...");
         DesfireAuth.ChangeKeyTo3Des(reader, aesSessionKey, reverted3DesKey);
-        Logger.Info("Master key successfully reverted to 2-key 3DES!");
+        Logger.Info("Master key successfully reverted to 3K3DES!");
 
-        // 4. Re-authenticate using Native/Legacy (0x0A) auth with a 24-byte key to prove it is completely supported now
-        var reverted24ByteKey = new byte[24]; // 24-byte 3DES key
-        Logger.Info("Re-authenticating with the reverted key using legacy Native (0x0A) authentication and 24-byte key...");
-        var nativeSessionKey = DesfireAuth.Authenticate(reader, DfConstants.Cmd.Auth.Native, 0, reverted24ByteKey);
-        Logger.Info($"Native/3DES Session key: {BitConverter.ToString(nativeSessionKey)}");
-        Logger.Info("Native/3DES authentication successful!");
+        // ── Step 6: Re-authenticate with the reverted 3K3DES key (ISO auth 0x1A) ─────────────
+        Logger.Info("Re-authenticating with the reverted 3K3DES key via ISO auth (0x1A)...");
+        var finalSessionKey = DesfireAuth.Authenticate(reader, DfConstants.Cmd.Auth.Iso, 0, reverted3DesKey);
+        Logger.Info($"3K3DES session key: {BitConverter.ToString(finalSessionKey)}");
+        Logger.Info("3K3DES authentication successful! Card is in a known 3K3DES state.");
     }
 }

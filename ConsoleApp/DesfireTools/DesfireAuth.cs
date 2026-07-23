@@ -1,4 +1,4 @@
-﻿using System.Security.Cryptography;
+using System.Security.Cryptography;
 using ConsoleApp.Extensions;
 using ConsoleApp.Utils;
 using PCSC.Iso7816;
@@ -7,6 +7,22 @@ namespace ConsoleApp.DesfireTools;
 
 public static class DesfireAuth
 {
+    /// <summary>
+    /// Parses the 2-byte payload returned by GetKeySettings (0x45).
+    /// Byte 0 = access rights / key settings byte.
+    /// Byte 1 = upper nibble is key type (0x00=DES/2K3DES, 0x40=3K3DES, 0x80=AES),
+    ///          lower nibble is the number of keys.
+    /// </summary>
+    public static (DfKeyType KeyType, byte KeyCount) ParseKeySettings(byte[] response)
+    {
+        if (response.Length < 2)
+            throw new ArgumentException("GetKeySettings response must be at least 2 bytes.", nameof(response));
+        var typeByte = response[1];
+        var keyType = (DfKeyType)(typeByte & 0xF0);
+        var keyCount = (byte)(typeByte & 0x0F);
+        return (keyType, keyCount);
+    }
+
     private static byte[] AesDecrypt(byte[] key, byte[] iv, byte[] ciphertext)
     {
         using var aes = Aes.Create();
@@ -89,63 +105,78 @@ public static class DesfireAuth
     /// Changes the PICC master key to AES and sets the key version.
     /// Since the current authenticated key is 0x00 (or we are changing key 0x00),
     /// we use the SAME-KEY ChangeKey scheme.
-    /// Under native/legacy authentication (0x0A), we must use CRC16 of only [newAESKey + newKeyVersion].
-    /// Aligned to the 8-byte block boundary of the active session, the plaintext block is exactly 24 bytes long.
+    /// <para>
+    /// Encryption mode depends on the active session type:
+    /// - Native (0x0A) / 2K3DES session (16-byte session key): uses legacy CBC-send/decrypt mode with CRC16.
+    /// - ISO (0x1A) / 3K3DES session (24-byte session key): uses standard forward 3DES-CBC with CRC32.
+    /// </para>
     /// </summary>
-    public static void ChangeKeyToAes(IsoReader isoReader, byte[] sessionKey, byte[] newAesKey, byte newKeyVersion, bool useCrc16 = true)
+    public static void ChangeKeyToAes(IsoReader isoReader, byte[] sessionKey, byte[] newAesKey, byte newKeyVersion)
     {
         if (newAesKey.Length != 16)
             throw new ArgumentException("AES-128 key must be exactly 16 bytes.", nameof(newAesKey));
 
+        // A 24-byte session key means we are in a 3K3DES ISO-auth session.
+        // A 16-byte session key means we are in a 2K3DES / Native-auth session.
+        bool isIsoSession = sessionKey.Length == 24;
+
         byte[] plaintext;
-        if (useCrc16)
-        {
-            // CRC16 of: newAesKey (16 bytes) + newKeyVersion (1 byte)
-            var crcData = new byte[17];
-            Array.Copy(newAesKey, 0, crcData, 0, 16);
-            crcData[16] = newKeyVersion;
+        var zeroIv = new byte[8];
 
-            var crc16 = DesfireCrc.CalculateCrc16(crcData);
-
-            // Construct 24-byte plaintext block to be encrypted:
-            // [newAesKey (16 bytes)] + [newKeyVersion (1 byte)] + [CRC16 (2 bytes)] + [Padding (5 bytes of 0x00)]
-            plaintext = new byte[24];
-            Array.Copy(newAesKey, 0, plaintext, 0, 16);
-            plaintext[16] = newKeyVersion;
-            Array.Copy(crc16, 0, plaintext, 17, 2);
-        }
-        else
+        if (isIsoSession)
         {
-            // CRC32 of: cmd (0xC4) + KeyNo (0x80) + newAesKey (16 bytes) + newKeyVersion (1 byte)
+            // ISO (3K3DES) session: CRC32 over cmd + keyNo + newKey + version,
+            // then encrypt with standard forward 3DES-CBC.
             var crcData = new byte[19];
             crcData[0] = DfConstants.Cmd.ChangeKey;
-            crcData[1] = 0x80; // PICC Master Key No with AES type flag (0x00 | 0x80 = 0x80)
+            crcData[1] = 0x80; // PICC master key number with AES type flag
             Array.Copy(newAesKey, 0, crcData, 2, 16);
             crcData[18] = newKeyVersion;
-
             var crc32 = DesfireCrc.CalculateCrc32(crcData);
 
-            // Construct 24-byte plaintext block to be encrypted:
-            // [newAesKey (16 bytes)] + [newKeyVersion (1 byte)] + [CRC32 (4 bytes)] + [Padding (3 bytes of 0x00)]
+            // [newAesKey (16)] + [version (1)] + [CRC32 (4)] + [padding (3)] = 24 bytes (3 × 8)
             plaintext = new byte[24];
             Array.Copy(newAesKey, 0, plaintext, 0, 16);
             plaintext[16] = newKeyVersion;
             Array.Copy(crc32, 0, plaintext, 17, 4);
+
+            // Standard forward 3DES-CBC — required for ISO-auth sessions
+            var encryptedData = TripleDesCrypto.Encrypt(sessionKey, zeroIv, plaintext);
+
+            var apduPayload = new byte[1 + encryptedData.Length];
+            apduPayload[0] = 0x80;
+            Array.Copy(encryptedData, 0, apduPayload, 1, encryptedData.Length);
+
+            var response = isoReader.DfTransmit(DfConstants.Cmd.ChangeKey, apduPayload);
+            if (response.SW2 != DfConstants.Sw.Sw2Ok)
+                throw new Exception($"ChangeKey failed with SW: {BitConverter.ToString([response.SW1, response.SW2])}");
         }
+        else
+        {
+            // Native (2K3DES) session: CRC16 over newKey + version,
+            // then encrypt with legacy CBC-send/decrypt mode.
+            var crcData = new byte[17];
+            Array.Copy(newAesKey, 0, crcData, 0, 16);
+            crcData[16] = newKeyVersion;
+            var crc16 = DesfireCrc.CalculateCrc16(crcData);
 
-        // Encrypt the plaintext using the current DES/3DES session key in CBC send/decryption mode
-        var zeroIv = new byte[8];
-        var encryptedData = TripleDesCrypto.EncryptCbcDecrypt(sessionKey, zeroIv, plaintext);
+            // [newAesKey (16)] + [version (1)] + [CRC16 (2)] + [padding (5)] = 24 bytes (3 × 8)
+            plaintext = new byte[24];
+            Array.Copy(newAesKey, 0, plaintext, 0, 16);
+            plaintext[16] = newKeyVersion;
+            Array.Copy(crc16, 0, plaintext, 17, 2);
 
-        // Construct APDU payload: KeyNo (0x80) + encryptedData (24 bytes)
-        var apduPayload = new byte[25];
-        apduPayload[0] = 0x80;
-        Array.Copy(encryptedData, 0, apduPayload, 1, 24);
+            // Legacy CBC-send/decrypt mode — required for Native-auth sessions
+            var encryptedData = TripleDesCrypto.EncryptCbcDecrypt(sessionKey, zeroIv, plaintext);
 
-        // Send ChangeKey APDU command to the card
-        var response = isoReader.DfTransmit(DfConstants.Cmd.ChangeKey, apduPayload);
-        if (response.SW2 != DfConstants.Sw.Sw2Ok)
-            throw new Exception($"ChangeKey failed with SW: {BitConverter.ToString([response.SW1, response.SW2])}");
+            var apduPayload = new byte[25];
+            apduPayload[0] = 0x80;
+            Array.Copy(encryptedData, 0, apduPayload, 1, 24);
+
+            var response = isoReader.DfTransmit(DfConstants.Cmd.ChangeKey, apduPayload);
+            if (response.SW2 != DfConstants.Sw.Sw2Ok)
+                throw new Exception($"ChangeKey failed with SW: {BitConverter.ToString([response.SW1, response.SW2])}");
+        }
     }
 
     /// <summary>

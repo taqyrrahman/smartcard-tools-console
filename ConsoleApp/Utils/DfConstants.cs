@@ -1,4 +1,15 @@
-﻿namespace ConsoleApp.Utils;
+namespace ConsoleApp.Utils;
+
+/// <summary>
+/// Key type as encoded in the upper nibble of byte 1 of the GetKeySettings response.
+/// </summary>
+public enum DfKeyType
+{
+    Des       = 0x00, // Single-DES (8-byte key)
+    TwoDes    = 0x00, // 2-key 3DES (16-byte key) — same encoding as single-DES for the master key
+    ThreeDes  = 0x40, // 3-key 3DES (24-byte key)
+    Aes       = 0x80, // AES-128 (16-byte key)
+}
 
 public static class DfConstants
 {
