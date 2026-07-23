@@ -39,10 +39,12 @@ internal static class Program
         DesfireAuth.ChangeKeyTo3Des(reader, aesSessionKey, reverted3DesKey);
         Logger.Info("Master key successfully reverted to 3DES!");
 
-        // 4. Re-authenticate using the reverted 3DES key via Native auth (0x0A)
-        Logger.Info("Re-authenticating with the reverted 3DES key...");
-        var nativeSessionKey = DesfireAuth.Authenticate(reader, DfConstants.Cmd.Auth.Native, 0, reverted3DesKey);
-        Logger.Info($"Native/3DES Session key: {BitConverter.ToString(nativeSessionKey)}");
-        Logger.Info("Native/3DES authentication successful!");
+        // 4. Re-authenticate using the reverted 3DES key via correct authentication protocol (ISO for 3-key 3DES, Native for 2-key 3DES)
+        var authType = reverted3DesKey.Length == 24 ? DfConstants.Cmd.Auth.Iso : DfConstants.Cmd.Auth.Native;
+        var authName = authType == DfConstants.Cmd.Auth.Iso ? "ISO" : "Native";
+        Logger.Info($"Re-authenticating with the reverted 3DES key via {authName} auth...");
+        var nativeSessionKey = DesfireAuth.Authenticate(reader, authType, 0, reverted3DesKey);
+        Logger.Info($"{authName}/3DES Session key: {BitConverter.ToString(nativeSessionKey)}");
+        Logger.Info($"{authName}/3DES authentication successful!");
     }
 }
