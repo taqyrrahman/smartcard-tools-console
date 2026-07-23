@@ -78,16 +78,23 @@ internal static class Program
         Logger.Info($"AES session key: {BitConverter.ToString(aesSessionKey)}");
         Logger.Info("AES authentication successful!");
 
-        // ── Step 5: Revert master key back to 3K3DES (24-byte, all-zeros) ────────────────────
-        var reverted3DesKey = new byte[24]; // 24-byte 3K3DES all-zeros key
-        Logger.Info("Changing master key back to 3K3DES (24-byte key)...");
-        DesfireAuth.ChangeKeyTo3Des(reader, aesSessionKey, reverted3DesKey);
-        Logger.Info("Master key successfully reverted to 3K3DES!");
+        // ── Step 5: Revert master key back to 2K3DES (16-byte, all-zeros) ────────────────────
+        var reverted2kDesKey = new byte[16]; // 16-byte 2K3DES all-zeros key
+        Logger.Info("Changing master key back to 2K3DES (16-byte key)...");
+        DesfireAuth.ChangeKeyTo3Des(reader, aesSessionKey, reverted2kDesKey);
+        Logger.Info("Master key successfully reverted to 2K3DES!");
 
-        // ── Step 6: Re-authenticate with the reverted 3K3DES key (ISO auth 0x1A) ─────────────
-        Logger.Info("Re-authenticating with the reverted 3K3DES key via ISO auth (0x1A)...");
-        var finalSessionKey = DesfireAuth.Authenticate(reader, DfConstants.Cmd.Auth.Iso, 0, reverted3DesKey);
-        Logger.Info($"3K3DES session key: {BitConverter.ToString(finalSessionKey)}");
-        Logger.Info("3K3DES authentication successful! Card is in a known 3K3DES state.");
+        // Verify what key type the card actually stored
+        var postChangeKeySettings = reader.DfTransmit(DfConstants.Cmd.GetKeySettings, []);
+        var postChangeData = postChangeKeySettings.GetData() ?? [];
+        Logger.Info($"Post-ChangeKey GetKeySettings: {BitConverter.ToString(postChangeData)}");
+        var (postKeyType, _) = DesfireAuth.ParseKeySettings(postChangeData);
+        Logger.Info($"Card key type after ChangeKey: {postKeyType}");
+
+        // ── Step 6: Re-authenticate with the reverted 2K3DES key (Native auth 0x0A) ────────────
+        Logger.Info("Re-authenticating with the reverted 2K3DES key via Native auth (0x0A)...");
+        var finalSessionKey = DesfireAuth.Authenticate(reader, DfConstants.Cmd.Auth.Native, 0, reverted2kDesKey);
+        Logger.Info($"2K3DES session key: {BitConverter.ToString(finalSessionKey)}");
+        Logger.Info("2K3DES authentication successful! Card is in a known 2K3DES state.");
     }
 }
