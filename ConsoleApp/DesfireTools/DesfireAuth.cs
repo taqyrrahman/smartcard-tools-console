@@ -136,6 +136,7 @@ public static class DesfireAuth
         }
 
         // Encrypt the plaintext using the current DES/3DES session key in CBC send/decryption mode
+        // After any successful authentication (Native or ISO), the communication IV is always reset to all zeroes.
         var zeroIv = new byte[8];
         var encryptedData = TripleDesCrypto.EncryptCbcDecrypt(sessionKey, zeroIv, plaintext);
 
@@ -237,7 +238,6 @@ public static class DesfireAuth
         if (!rndAPrime.SequenceEqual(ByteManipulation.RotateLeft(rndA)))
             throw new Exception("Authentication failed: card cryptogram invalid.");
 
-        // var sessionIv = encRndARotated.AsSpan(encRndARotated.Length - 8, 8).ToArray();
         var sessionKey = GenerateSessionKey(rndA, rndB, key);
         return sessionKey;
     }
