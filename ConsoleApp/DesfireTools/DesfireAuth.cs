@@ -200,27 +200,36 @@ public static class DesfireAuth
     public static byte[] Authenticate(IsoReader isoReader, byte authType, byte keyNo, byte[] key)
     {
         var zeroIv = new byte[8];
+        int rndSize = key.Length == 24 ? 16 : 8;
 
         // Phase 1 — card sends encrypted RndB
         var phase1 = isoReader.DfTransmit(authType, [keyNo]);
         var encRndB = phase1.GetData() ?? [];
+        if (encRndB.Length != rndSize)
+            throw new Exception($"Expected {rndSize}-byte encrypted RndB, got {encRndB.Length} bytes.");
+
         var rndB = TripleDesCrypto.Decrypt(key, zeroIv, encRndB);
         var rndBShifted = ByteManipulation.RotateLeft(rndB);
 
         // Phase 2 — we send encrypted (RndA || RndB\')
-        var rndA = RandomNumberGenerator.GetBytes(8);
+        var rndA = RandomNumberGenerator.GetBytes(rndSize);
         var plaintext = rndA.Concat(rndBShifted).ToArray();
-        var phase2Iv = authType == DfConstants.Cmd.Auth.Iso ? encRndB : zeroIv;
+        var phase2Iv = authType == DfConstants.Cmd.Auth.Iso
+            ? encRndB.AsSpan(encRndB.Length - 8, 8).ToArray()
+            : zeroIv;
         var phase2Payload = TripleDesCrypto.Encrypt(key, phase2Iv, plaintext);
 
         // IV rolls forward: for ISO auth it is the last 8 bytes of what we just sent
         var rollingIv = authType == DfConstants.Cmd.Auth.Iso
-            ? phase2Payload.AsSpan(8, 8).ToArray()
+            ? phase2Payload.AsSpan(phase2Payload.Length - 8, 8).ToArray()
             : zeroIv;
 
         // Phase 3 — card sends encrypted RndA' (rotated RndA), we verify it
         var phase3 = isoReader.DfTransmit(DfConstants.Cmd.AdditionalFrame, phase2Payload);
         var encRndARotated = phase3.GetData() ?? [];
+        if (encRndARotated.Length != rndSize)
+            throw new Exception($"Expected {rndSize}-byte encrypted RndA', got {encRndARotated.Length} bytes.");
+
         var rndAPrime = TripleDesCrypto.Decrypt(key, rollingIv, encRndARotated);
 
         if (!rndAPrime.SequenceEqual(ByteManipulation.RotateLeft(rndA)))
@@ -233,6 +242,25 @@ public static class DesfireAuth
 
     private static byte[] GenerateSessionKey(byte[] rndA, byte[] rndB, byte[] masterKey)
     {
+        if (masterKey.Length == 24)
+        {
+            var key3k = new byte[24];
+            // Session Key under 3K3DES:
+            // RndA[0..3] + RndB[0..3] + RndA[6..9] + RndB[6..9] + RndA[12..15] + RndB[12..15]
+            Array.Copy(rndA, 0, key3k, 0, 4);
+            Array.Copy(rndB, 0, key3k, 4, 4);
+            Array.Copy(rndA, 6, key3k, 8, 4);
+            Array.Copy(rndB, 6, key3k, 12, 4);
+            Array.Copy(rndA, 12, key3k, 16, 4);
+            Array.Copy(rndB, 12, key3k, 20, 4);
+
+            for (int i = 0; i < 24; i++)
+            {
+                key3k[i] &= 0xFE;
+            }
+            return key3k;
+        }
+
         bool isSingleDes = masterKey.Length == 8 ||
                            (masterKey.Length >= 16 && masterKey.Take(8).SequenceEqual(masterKey.Skip(8).Take(8)));
 
@@ -250,6 +278,11 @@ public static class DesfireAuth
             Array.Copy(rndB, 0, key, 4, 4);
             Array.Copy(rndA, 4, key, 8, 4);
             Array.Copy(rndB, 4, key, 12, 4);
+        }
+
+        for (int i = 0; i < 16; i++)
+        {
+            key[i] &= 0xFE;
         }
         return key;
     }

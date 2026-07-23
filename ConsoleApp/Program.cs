@@ -34,7 +34,7 @@ internal static class Program
         Logger.Info("AES-128 authentication successful!");
 
         // 3. Revert back to 3DES
-        var reverted3DesKey = new byte[16]; // Standard all zeroes 3DES master key (same as original)
+        var reverted3DesKey = new byte[24]; // Standard all zeroes 3DES master key (same as original)
         Logger.Info("Changing master key back to 3DES...");
         DesfireAuth.ChangeKeyTo3Des(reader, aesSessionKey, reverted3DesKey);
         Logger.Info("Master key successfully reverted to 3DES!");

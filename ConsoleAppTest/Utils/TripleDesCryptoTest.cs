@@ -72,4 +72,26 @@ public class TripleDesCryptoTest
 
         Assert.Equal(plaintext, decrypted);
     }
+
+    [Fact]
+    public void Test3K3DesSessionKeyDerivation()
+    {
+        // Verified 3-key 3DES session key derivation example from hack.cert.pl:
+        // * RndB:      31 6E 6D 76 A4 49 F9 25 BA 30 4F B2 65 36 56 A2
+        // * RndA:      36 C5 F8 BF 4A 09 AC 23 9E 8D A0 C7 32 51 D4 AB
+        // * Expected SessKey:   36 C4 F8 BE 30 6E 6C 76 AC 22 9E 8C F8 24 BA 30 32 50 D4 AA 64 36 56 A2
+        var rndB = Convert.FromHexString("316E6D76A449F925BA304FB2653656A2");
+        var rndA = Convert.FromHexString("36C5F8BF4A09AC239E8DA0C73251D4AB");
+        var masterKey = new byte[24]; // 3-key 3DES
+
+        // Invoke private static GenerateSessionKey via Reflection
+        var method = typeof(ConsoleApp.DesfireTools.DesfireAuth).GetMethod("GenerateSessionKey",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        Assert.NotNull(method);
+
+        var result = (byte[])method.Invoke(null, [rndA, rndB, masterKey])!;
+        var expectedSessKey = Convert.FromHexString("36C4F8BE306E6C76AC229E8CF824BA303250D4AA643656A2");
+
+        Assert.Equal(expectedSessKey, result);
+    }
 }
